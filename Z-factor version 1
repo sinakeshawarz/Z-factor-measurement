@@ -212,6 +212,7 @@ if __name__ == '__main__':
     T_r = T_system / T_pc_corr
     P_r = antoine.P / P_pc_corr
     
+
     print("Components:", components)
     print("Operating Temperature (K):", T_system)
     print("Operating Pressure (Pa):", antoine.P)
@@ -225,3 +226,43 @@ if __name__ == '__main__':
     print("Liquid compressibility factor, Z_liquid =", Z_liquid)
     print("Apparent Molecular Weight (g/mol):", M_app)
     print("Specific Gravity (SG):", SG)
+
+
+    # =============================================================================
+# Gas Formation Volume Factor Calculation
+# =============================================================================
+class GasProperties:
+    def __init__(self, P):
+        """
+        Initialize the class with pressure in Pascals (Pa).
+        Convert the pressure to psia for internal calculations.
+        
+        Parameters:
+        P (float): Pressure in Pascals (Pa)
+        """
+        # Convert pressure from Pa to psia (1 psia = 6894.76 Pa)
+        self.P = P / 6894.76
+
+    def gas_formation_volume_factor(self, Z_vapor, T_system):
+        """
+        Calculate the gas formation volume factor B_g (in ft^3/scf).
+
+        Parameters:
+        Z_vapor  (float): Gas compressibility factor (dimensionless)
+        T_system (float): Temperature in Kelvin (K)
+
+        Returns:
+        float: The gas formation volume factor B_g (ft^3/scf)
+        """
+        # Convert T_system from Kelvin to Rankine (1 K = 1.8 °R)
+        T_rankine = T_system * 1.8
+        return 0.02827 * Z_vapor * (T_rankine / self.P)  
+
+            # Use the measured Z_vapor, operating temperature (T_system in Kelvin),
+    # and operating pressure (self.P from antoine, in Pascals)
+gas_calc = GasProperties(P=antoine.P)
+B_g = gas_calc.gas_formation_volume_factor(Z_vapor, T_system)
+E_g = 1 / B_g
+
+print(f"Gas Formation Volume Factor (B_g) = {B_g:.5f} ft^3/scf")
+print(f"Gas Expansion Factor (E_g) = {E_g:.5f} scf/ft^3")

@@ -304,69 +304,6 @@ gas_density_specific = (28.967 * gamma_g * p_psi) / (z * R_const * T_rankine)
 
 print(f"Gas Density (using specific gravity formula) = {gas_density_specific:.5f} lb/ft^3")
 
-# =============================================================================
-# Gas Viscosity Calculation (Integrated)
-# =============================================================================
-
-
-def calculate_gas_viscosity(T_system, self_P, gamma_g):
-    """
-    Calculates gas viscosity (μg) in centipoise (cP) using the provided formulas.
-    
-    Args:
-        T_system: Temperature in Kelvin.
-        self_P: Pressure in Pascals.
-        gamma_g: Specific gravity of the gas (dimensionless).
-    
-    Returns:
-        Gas viscosity (μg) in centipoise (cP), or None if an error occurs.
-    
-    Note:
-        This function converts:
-         - T_system (K) to Rankine: T_R = T_system * 1.8
-         - self_P (Pa) to psi: P_psi = self_P / 6894.76
-         - Also, the reference pressure 1e5 Pa is converted to psi (≈14.5038 psi)
-    """
-    try:
-        # Convert temperature from Kelvin to Rankine (1 K = 1.8 °R)
-        T_R = T_system * 1.8
-
-        # Convert pressure from Pascals to psi (1 psi = 6894.76 Pa)
-        P_psi = self_P / 6894.76
-        
-        # Convert the reference pressure 1e5 Pa to psi (~14.5038 psi)
-        P_ref_psi = 14.5038
-        
-        # Calculate parameter b using T_R
-        b = 3.448 + (986.4 / T_R) + 0.01009 * (28.967 * gamma_g)
-        
-        # Calculate parameter K; note (T_R + 120) and (P_psi + P_ref_psi) are in Rankine and psi respectively
-        K = (1.709e6 * (28.967 * gamma_g)**1.5) / ((T_R + 120) * (P_psi + P_ref_psi))
-        
-        # Calculate gas viscosity in centipoise (cP)
-        mu_g = 1e-4 * K * math.exp(b / T_R)
-        return mu_g
-    except ZeroDivisionError:
-        print("Error: Division by zero encountered. Check input values (T_system and self_P after conversion).")
-        return None
-    except OverflowError:
-        print("Error: Calculation resulted in a number too large to represent.")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None
-
-# ------------------------- Integration into Main Code -------------------------
-
-# In the main code:
-#   T_system = 336.483       # Operating temperature in Kelvin
-#   antoine.P = 6.6328e+7      # Operating pressure in Pascals (~203.9 bar)
-#   SG has been calculated earlier as the specific gravity (dimensionless)
-
-# The gas viscosity is computed based on the converted values T_R, P_psi, and gamma_g.
-mu_g = calculate_gas_viscosity(T_system, antoine.P, SG)
-print(f"Gas Viscosity (μg) = {mu_g:.5f} cP")
-
 
 
 
@@ -434,4 +371,86 @@ mu_g_lge = lee_gonzalez_eakin_viscosity(M_app_lb, T_R, gas_density_specific)
 
 print(f"Gas Viscosity (Lee-Gonzalez-Eakin) = {mu_g_lge:.5f} cP")
 
+
+
+# =============================================================================
+# Herning_zipperer Gas Viscosity Calculation
+# =============================================================================
+
+def herning_zipperer_viscosity(y, Mw, pure_visc_data, components):
+    """
+    Calculates the natural gas mixture viscosity (μ_mix) in centipoise (cP)
+    using the Herning–Zipperer correlation.
+    
+    The formula is:
+        μ_mix = Σ [ y_i * μ_i * sqrt(M_i / M_mix) ]
+    where:
+        y_i   = mole fraction of component i
+        μ_i   = pure component viscosity of component i (cP)
+        M_i   = molecular weight of component i (lb/lb-mole)
+        M_mix = Σ (y_i * M_i) is the average molecular weight (lb/lb-mole)
+    
+    Parameters:
+    -----------
+    y : array_like
+        Mole fractions of each component (should sum to 1), e.g., antoine.y.
+    Mw : array_like
+        Molecular weights of each component in g/mol.
+    pure_visc_data : dict
+        Dictionary of pure component viscosities (in cP) for each component.
+    components : list
+        List of component names corresponding to the order in y and Mw.
+        
+    Returns:
+    --------
+    mu_mix : float
+        The mixture viscosity in cP.
+    """
+    import numpy as np
+    # Convert molecular weights from g/mol to lb/lb-mole (1 lb-mole = 453.59237 g)
+    Mw_lb = Mw / 453.59237
+    # Create an array of pure component viscosities in the same order as your components
+    pure_visc = np.array([pure_visc_data[c] for c in components])
+    # Calculate the mixture average molecular weight (lb/lb-mole)
+    M_mix = np.sum(y * Mw_lb)
+    # Calculate the mixture viscosity using the Herning-Zipperer formula
+    mu_mix = np.sum(y * pure_visc * np.sqrt(Mw_lb / M_mix))
+    return mu_mix
+
+# ---------------- Example Integration ----------------
+# In your main code you have:
+#   components: list of component names.
+#   antoine.y: mole fractions as a NumPy array.
+#   Mw: molecular weights in g/mol (from Mw_data).
+
+# Convert molecular weights from g/mol to lb/lb-mole:
+# (This is done inside the function.)
+# Define a dictionary of pure component viscosities (in cP) – these values are approximate.
+pure_visc_data = {
+    'Methane':   0.010,   # cP
+    'Ethane':    0.012,
+    'Propane':   0.015,
+    'nButane':   0.017,
+    'iButane':   0.017,
+    'nPentane':  0.020,
+    'iPentane':  0.020,
+    'C7+':       0.030,
+    'C6':        0.025,
+    'CO2':       0.015,
+    'N2':        0.010,
+    'H2S':       0.015
+}
+
+# Now, calculate the mixture viscosity using Herning–Zipperer:
+mu_mix_hz = herning_zipperer_viscosity(antoine.y, Mw, pure_visc_data, components)
+print(f"Gas Viscosity (Herning-Zipperer) = {mu_mix_hz:.5f} cP")
+
+
+# -----------------------------------------------------------------------------
+# Calculate the Average Gas Viscosity
+# -----------------------------------------------------------------------------
+# The average of the viscosities from the Lee-Gonzalez-Eakin and Herning-Zipperer 
+# methods is found to be inline with the Carr–Kobayashi–Burrows Correlation Method.
+avg_viscosity = (mu_g_lge + mu_mix_hz) / 2
+print(f"Average Gas Viscosity (LGE & Herning-Zipperer) = {avg_viscosity:.5f} cP")
 

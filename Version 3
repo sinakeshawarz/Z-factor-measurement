@@ -1,0 +1,437 @@
+#The parameters that everytime you need to update is "C7+ , in case of C7+, we need to update two sections, the "self.data" and " self.Mw_data "   " - "self.P" - "  T_system " - "components" - " y or fractions  "
+#%% [code]
+import numpy as np
+from scipy.optimize import fsolve
+import math
+
+
+# =============================================================================
+# Component Data Class
+# =============================================================================
+class ComponentData:
+    def __init__(self, components):
+        self.data = {    #Critical Temperature (K). #Critical Pressure (bar) #Acentric Factor
+            'Methane':   [190.562, 46.064, 0.011433],
+            'Ethane':    [305.406, 48.795, 0.099161],
+            'Propane':   [369.901, 42.554, 0.15251],
+            'nButane':   [425.817, 38.104, 0.19527],
+            'iButane':   [407.776, 36.377, 0.18477],
+            'nPentane':  [469.754, 33.684, 0.25056],
+            'iPentane':  [460.45,  33.341, 0.22168],
+            'C7+':       [702.8722222, 18.2628, 0.34958],
+            'C6':        [507.6,   30.3,   0.301],      
+            'CO2':       [304.179, 73.821, 0.22551],
+            'N2':        [126.207, 33.983, 0.036816],
+            'H2S':       [373.25,  89.495, 0.096764]
+        }
+        self.Mw_data = {
+            'Methane':   16.04,
+            'Ethane':    30.07,
+            'Propane':   44.10,
+            'nButane':   58.12,
+            'iButane':   58.12,
+            'nPentane':  72.15,
+            'iPentane':  72.15,
+            'C7+':       193.72,
+            'C6':        86.18,     
+            'CO2':       44.01,
+            'N2':        28.01,
+            'H2S':       34.08
+        }
+        self.components = components
+
+    def get_properties(self):
+        Tc = []
+        Pc = []  # will be converted to Pascals
+        wc = []
+        for comp in self.components:
+            if comp in self.data:
+                tc, pc, w = self.data[comp]
+                Tc.append(tc)
+                Pc.append(pc * 1e5)  # convert bar to Pa
+                wc.append(w)
+            else:
+                raise ValueError(f"Component '{comp}' not found in data dictionary.")
+        return np.array(Tc), np.array(Pc), np.array(wc)
+
+    def get_molecular_weights(self):
+        Mw = []
+        for comp in self.components:
+            if comp in self.Mw_data:
+                Mw.append(self.Mw_data[comp])
+            else:
+                raise ValueError(f"Molecular weight for component '{comp}' not found.")
+        return np.array(Mw)
+
+# =============================================================================
+# Dummy Antoine Class
+# =============================================================================
+class DummyAntoine:
+    def __init__(self, components, y, kij_value=0.020):
+        comp_data = ComponentData(components)
+        self.Tc, self.Pc, self.wc = comp_data.get_properties()
+        self.Mw = comp_data.get_molecular_weights()  # Molecular weights (g/mol)
+        self.Nc = len(components)
+        self.y = np.array(y)  # Vapor mole fractions (should sum to 1)
+        self.R = 8.314       # J/mol·K (Universal gas constant)
+        self.omega = 0.07780 # Peng-Robinson constant
+        self.psi = 0.45724   # Peng-Robinson constant
+        # Operating pressure in Pascals – adjust as needed.
+        self.P = 6.6328e+7    # Example: 6.6328e7 Pa (~203.9 bar)
+        # Set kij uniformly for all pairs (calibrate as needed)
+        self.kij = np.full((self.Nc, self.Nc), kij_value)
+
+# =============================================================================
+# EoS Mixture Class with Fator_Z Calculation
+# =============================================================================
+class EoS_mistura_phenom:
+    def __init__(self, antoine, EoS):
+        self.Tc = antoine.Tc
+        self.w = antoine.wc
+        self.Nc = antoine.Nc
+        self.y = antoine.y
+        self.Pc = antoine.Pc
+        self.R = antoine.R
+        self.P = antoine.P
+        self.omega = antoine.omega
+        self.psi = antoine.psi
+        self.kij = antoine.kij
+        self.EoS = EoS  # 'PR' for Peng-Robinson, 'SRK', etc.
+
+    def parametros_EoS(self, T, x):
+        self.T = T
+        self.x = x
+        self.Tr = self.T / self.Tc
+
+        self.ai = np.zeros(self.Nc)
+        self.bi = np.zeros(self.Nc)
+        if self.EoS == 'PR':
+            kappai = 0.37464 + 1.54226 * self.w - 0.26992 * self.w**2
+            alphai = (1 + kappai * (1 - np.sqrt(self.Tr)))**2
+            for i in range(self.Nc):
+                self.ai[i] = self.psi * self.R**2 * (alphai[i] * self.Tc[i]**2) / self.Pc[i]
+                self.bi[i] = self.omega * self.R * self.Tc[i] / self.Pc[i]
+        elif self.EoS == 'SRK':
+            kappai = 0.480 + 1.574 * self.w - 0.176 * self.w**2
+            alphai = (1 + kappai * (1 - np.sqrt(self.Tr)))**2
+            for i in range(self.Nc):
+                self.ai[i] = self.psi * self.R**2 * (alphai[i] * self.Tc[i]**2) / self.Pc[i]
+                self.bi[i] = self.omega * self.R * self.Tc[i] / self.Pc[i]
+        else:
+            for i in range(self.Nc):
+                self.ai[i] = self.psi * self.R**2 * (self.Tr[i]**(-0.5) * self.Tc[i]**2) / self.Pc[i]
+                self.bi[i] = self.omega * self.R * self.Tc[i] / self.Pc[i]
+
+        self.aij = np.zeros((self.Nc, self.Nc))
+        for i in range(self.Nc):
+            for j in range(self.Nc):
+                self.aij[i, j] = (1 - self.kij[i, j]) * np.sqrt(self.ai[i] * self.ai[j])
+        self.av = np.sum(np.outer(self.y, self.y) * self.aij)
+        self.bv = np.sum(self.y * self.bi)
+
+        self.betav = self.bv * self.P / (self.R * self.T)
+        self.qv = self.av / (self.bv * self.R * self.T)
+
+        self.ql = self.qv
+        self.betal = self.betav
+
+        return self.betav, self.betal, self.bv, self.ql, self.qv
+
+    def Fator_Z(self):
+        A = self.qv * self.betav
+        c3 = 1.0
+        c2 = -(1 - self.betav)
+        c1 = A - 3 * self.betav**2 - 2 * self.betav
+        c0 = -(A * self.betav - self.betav**2 - self.betav**3)
+        coef = [c3, c2, c1, c0]
+        roots = np.roots(coef)
+        real_roots = np.real(roots[np.isreal(roots)])
+        if len(real_roots) > 0:
+            Zv = np.max(real_roots)
+            Zl = np.min(real_roots)
+        else:
+            Zv = np.nan
+            Zl = np.nan
+        return Zv, Zl
+
+# =============================================================================
+# Wichert–Aziz Correction Function for Acid Gases
+# =============================================================================
+def wichert_aziz_correction(T_pc, P_pc, y, components):
+    x_a = 0.0
+    if 'CO2' in components:
+        x_a += y[components.index('CO2')]
+    if 'H2S' in components:
+        x_a += y[components.index('H2S')]
+    if x_a == 0.0:
+        return T_pc, P_pc
+    T_pc_corr = T_pc - 44.44 * (x_a / (1 - x_a))
+    P_pc_corr = P_pc - 1.8625e7 * (x_a / (1 - x_a))**2
+    return T_pc_corr, P_pc_corr
+
+# =============================================================================
+# Main Execution Section
+# =============================================================================
+if __name__ == '__main__':
+    components = ['Methane', 'Ethane', 'Propane', 'nButane', 'iButane',
+                  'nPentane', 'iPentane', 'C7+', 'C6', 'CO2', 'N2', 'H2S']
+    y = [0.6632, 0.0387, 0.0283, 0.013, 0.0067, 0.0066, 0.006, 0.0729, 0.0096, 0.1016, 0.003, 0.0504]
+
+    print("Components:", components)
+    print("Mole fractions:", y)
+    print("Sum of mole fractions:", sum(y))
+
+    antoine = DummyAntoine(components, y, kij_value=0.020)
+    eos_mix = EoS_mistura_phenom(antoine, 'PR')
+
+    T_system = 336.483  # Operating temperature in Kelvin
+    x_initial = antoine.y
+
+    eos_mix.parametros_EoS(T_system, x_initial)
+    Z_vapor, Z_liquid = eos_mix.Fator_Z()
+
+    Mw_data = {
+        'Methane': 16.04,
+        'Ethane': 30.07,
+        'Propane': 44.10,
+        'nButane': 58.12,
+        'iButane': 58.12,
+        'nPentane': 72.15,
+        'iPentane': 72.15,
+        'C7+': 193.72,
+        'C6': 86.18,
+        'CO2': 44.01,
+        'N2': 28.01,
+        'H2S': 34.08
+    }
+    Mw = np.array([Mw_data[c] for c in components])
+    M_app = np.sum(antoine.y * Mw)
+    SG = M_app / 28.96
+
+    T_pc = np.sum(antoine.y * antoine.Tc)
+    P_pc = np.sum(antoine.y * antoine.Pc)
+    T_pc_corr, P_pc_corr = wichert_aziz_correction(T_pc, P_pc, antoine.y, components)
+    T_r = T_system / T_pc_corr
+    P_r = antoine.P / P_pc_corr
+
+
+    print("Components:", components)
+    print("Operating Temperature (K):", T_system)
+    print("Operating Pressure (Pa):", antoine.P)
+    print("Pseudo-critical Temperature (K):", T_pc)
+    print("Pseudo-critical Pressure (Pa):", P_pc)
+    print("Corrected Pseudo-critical Temperature (K):", T_pc_corr)
+    print("Corrected Pseudo-critical Pressure (Pa):", P_pc_corr)
+    print("Reduced Temperature (T_r):", T_r)
+    print("Reduced Pressure (P_r):", P_r)
+    print("Vapor compressibility factor, Z_vapor =", Z_vapor)
+    print("Liquid compressibility factor, Z_liquid =", Z_liquid)
+    print("Apparent Molecular Weight (g/mol):", M_app)
+    print("Specific Gravity (SG):", SG)
+
+
+    # =============================================================================
+# Gas Formation Volume Factor Calculation
+# =============================================================================
+class GasProperties:
+    def __init__(self, P):
+        """
+        Initialize the class with pressure in Pascals (Pa).
+        Convert the pressure to psia for internal calculations.
+
+        Parameters:
+        P (float): Pressure in Pascals (Pa)
+        """
+        # Convert pressure from Pa to psia (1 psia = 6894.76 Pa)
+        self.P = P / 6894.76
+
+    def gas_formation_volume_factor(self, Z_vapor, T_system):
+        """
+        Calculate the gas formation volume factor B_g (in ft^3/scf).
+
+        Parameters:
+        Z_vapor  (float): Gas compressibility factor (dimensionless)
+        T_system (float): Temperature in Kelvin (K)
+
+        Returns:
+        float: The gas formation volume factor B_g (ft^3/scf)
+        """
+        # Convert T_system from Kelvin to Rankine (1 K = 1.8 °R)
+        T_rankine = T_system * 1.8
+        return 0.02827 * Z_vapor * (T_rankine / self.P)
+
+            # Use the measured Z_vapor, operating temperature (T_system in Kelvin),
+    # and operating pressure (self.P from antoine, in Pascals)
+gas_calc = GasProperties(P=antoine.P)
+B_g = gas_calc.gas_formation_volume_factor(Z_vapor, T_system)
+E_g = 1 / B_g
+
+print(f"Gas Formation Volume Factor (B_g) = {B_g:.5f} ft^3/scf")
+print(f"Gas Expansion Factor (E_g) = {E_g:.5f} scf/ft^3")
+
+
+
+
+# =============================================================================
+# Gas Density Calculation using Specific Gravity Formula
+# =============================================================================
+# Equation:
+#   gas_density_specific = (28.967 * gamma_g * p) / (z * R * T)
+#
+# Unit Conversions:
+# - Convert operating pressure from Pa to psi:  p (psi) = antoine.P / 6894.76
+# - Operating temperature from Kelvin to °R:   T (°R) = T_system * 1.8
+# - Gas specific gravity (gamma_g) is calculated as SG (dimensionless)
+#   from: SG = M_app / 28.96
+
+# Convert operating pressure to psi
+p_psi = antoine.P / 6894.76
+
+# Gas specific gravity from the apparent molecular weight calculation
+gamma_g = SG
+
+# Convert operating temperature from Kelvin to Rankine (°R)
+T_rankine = T_system * 1.8
+
+# Define the gas constant R in ft^3·psi/(lb-mole·°R)
+R_const = 10.73
+
+# Use the vapor compressibility factor from your EoS calculation
+z = Z_vapor
+
+# Calculate gas density in lb/ft^3 using the specific gravity formula
+gas_density_specific = (28.967 * gamma_g * p_psi) / (z * R_const * T_rankine)
+
+print(f"Gas Density (using specific gravity formula) = {gas_density_specific:.5f} lb/ft^3")
+
+# =============================================================================
+# Gas Viscosity Calculation (Integrated)
+# =============================================================================
+
+
+def calculate_gas_viscosity(T_system, self_P, gamma_g):
+    """
+    Calculates gas viscosity (μg) in centipoise (cP) using the provided formulas.
+    
+    Args:
+        T_system: Temperature in Kelvin.
+        self_P: Pressure in Pascals.
+        gamma_g: Specific gravity of the gas (dimensionless).
+    
+    Returns:
+        Gas viscosity (μg) in centipoise (cP), or None if an error occurs.
+    
+    Note:
+        This function converts:
+         - T_system (K) to Rankine: T_R = T_system * 1.8
+         - self_P (Pa) to psi: P_psi = self_P / 6894.76
+         - Also, the reference pressure 1e5 Pa is converted to psi (≈14.5038 psi)
+    """
+    try:
+        # Convert temperature from Kelvin to Rankine (1 K = 1.8 °R)
+        T_R = T_system * 1.8
+
+        # Convert pressure from Pascals to psi (1 psi = 6894.76 Pa)
+        P_psi = self_P / 6894.76
+        
+        # Convert the reference pressure 1e5 Pa to psi (~14.5038 psi)
+        P_ref_psi = 14.5038
+        
+        # Calculate parameter b using T_R
+        b = 3.448 + (986.4 / T_R) + 0.01009 * (28.967 * gamma_g)
+        
+        # Calculate parameter K; note (T_R + 120) and (P_psi + P_ref_psi) are in Rankine and psi respectively
+        K = (1.709e6 * (28.967 * gamma_g)**1.5) / ((T_R + 120) * (P_psi + P_ref_psi))
+        
+        # Calculate gas viscosity in centipoise (cP)
+        mu_g = 1e-4 * K * math.exp(b / T_R)
+        return mu_g
+    except ZeroDivisionError:
+        print("Error: Division by zero encountered. Check input values (T_system and self_P after conversion).")
+        return None
+    except OverflowError:
+        print("Error: Calculation resulted in a number too large to represent.")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+
+# ------------------------- Integration into Main Code -------------------------
+
+# In the main code:
+#   T_system = 336.483       # Operating temperature in Kelvin
+#   antoine.P = 6.6328e+7      # Operating pressure in Pascals (~203.9 bar)
+#   SG has been calculated earlier as the specific gravity (dimensionless)
+
+# The gas viscosity is computed based on the converted values T_R, P_psi, and gamma_g.
+mu_g = calculate_gas_viscosity(T_system, antoine.P, SG)
+print(f"Gas Viscosity (μg) = {mu_g:.5f} cP")
+
+
+
+
+# =============================================================================
+# Lee-Gonzalez-Eakin Gas Viscosity Calculation
+# =============================================================================
+
+def lee_gonzalez_eakin_viscosity(M_app, T_R, gas_density_specific):
+    """
+    Calculates gas viscosity (μg) in centipoise (cP) using the Lee-Gonzalez-Eakin method.
+    
+    Parameters:
+    -----------
+    M_app : float
+        Apparent molecular weight of the gas mixture (lb/lb-mole).
+    T_R   : float
+        Reservoir temperature in Rankine (°R).
+    gas_density_specific : float
+        Gas density at reservoir conditions (lb/ft^3).
+        
+    Returns:
+    --------
+    mu_g : float
+        Gas viscosity in centipoise (cP).
+    
+    References:
+    -----------
+    Lee, A.L., Gonzalez, M.H., and Eakin, B.E. (1966).
+    "The Viscosity of Natural Gases." Journal of Petroleum Technology.
+    
+    Formulas:
+    ---------
+      μg = 10^-4 * K * exp[ X * ( (ρ_g) / 62.4 )^Y ]
+    where:
+      K = ( (9.4 + 0.02·M_app) · T^1.5 ) / (209 + 19·M_app + T )
+      X = 3.5 + (986 / T ) + 0.01·M_app
+      Y = 2.4 - 0.2·X
+      
+      ρ_g  : gas density (lb/ft^3)
+      T    : temperature in °R
+      M_app: apparent molecular weight (lb/lb-mole)
+    """
+    # 1) Compute K
+    K = ((9.4 + 0.02 * M_app) * (T_R ** 1.5)) / (209.0 + 19.0 * M_app + T_R)
+    
+    # 2) Compute X
+    X = 3.5 + (986.0 / T_R) + 0.01 * M_app
+    
+    # 3) Compute Y
+    Y = 2.4 - 0.2 * X
+    
+    # 4) Calculate μg (cP)
+    mu_g = 1e-4 * K * math.exp(X * ((gas_density_specific / 62.4) ** Y))
+    
+    return mu_g
+
+# Convert M_app from g/mol to lb/lb-mole (1 lb-mole = 453.59237 g)
+M_app_lb = M_app / 0.45359237
+
+# Convert operating temperature from Kelvin to Rankine (°R = K * 1.8)
+T_R = T_system * 1.8
+
+# Calculate gas viscosity using the Lee-Gonzalez-Eakin method
+mu_g_lge = lee_gonzalez_eakin_viscosity(M_app_lb, T_R, gas_density_specific)
+
+print(f"Gas Viscosity (Lee-Gonzalez-Eakin) = {mu_g_lge:.5f} cP")
+
+
